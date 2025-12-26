@@ -14,7 +14,7 @@
    - `LogParser` 类：核心解析逻辑与缓冲区管理
    - 帧格式：`0x7E` + [2字节长度] + [载荷] + `0x7E`
    - 时间帧：`0xAA 0xAA` + [6字节时间戳]
-   - 功能：长度字段验证、错误恢复、统计跟踪
+   - 功能：帧边界检测、错误恢复、统计跟踪
    - 输入模式：文件、十六进制字符串、标准输入
    - 输出格式：文本、十六进制、原始二进制
 
@@ -35,6 +35,9 @@
 ## 常用命令
 
 ### 运行解析器
+
+默认行为：无参数运行时显示帮助信息并提示输入bin文件路径。
+
 ```bash
 # 解析二进制文件
 python3 log_parser.py -f tests/test_simple_valid.bin
@@ -47,9 +50,6 @@ cat tests/test_simple_valid.bin | python3 log_parser.py
 
 # 从标准输入读取十六进制
 echo "7e000548656c6c6f7e" | python3 log_parser.py -x
-
-# 禁用长度验证
-python3 log_parser.py -f tests/test_mixed_bad_frames.bin --no-validate
 
 # 详细输出带统计信息
 python3 log_parser.py -f tests/test_simple_valid.bin -v
@@ -99,8 +99,8 @@ Claude 有权运行：
 ### 帧格式详情
 - **常规帧**：开始 `0x7E`，2字节长度（大端序），载荷，结束 `0x7E`
 - **时间帧**：`0xAA 0xAA` 后跟6字节时间戳
-- **长度验证**：可通过 `--no-validate` 标志禁用，用于损坏的日志
 - **十六进制输入**：接受带可选 `0x` 前缀、空格或冒号的十六进制字符串
+- **默认行为**：无参数时显示帮助信息并提示输入bin文件路径
 
 ### 代码风格
 - 使用 Python 类型提示（`typing` 模块）
