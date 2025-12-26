@@ -268,18 +268,18 @@ def main():
     input_group = parser.add_mutually_exclusive_group()
     input_group.add_argument('-f', '--file', help='输入二进制文件')
     input_group.add_argument('-x', '--hex', nargs='?', const='',
-                           help='Input as hex string (read from stdin if no value provided)')
+                           help='十六进制字符串输入（如未提供值则从标准输入读取）')
     input_group.add_argument('-s', '--stdin', action='store_true',
-                           help='Explicitly read binary from stdin (default if no other input)')
+                           help='显式从标准输入读取二进制数据（无其他输入时的默认行为）')
 
     parser.add_argument('--no-validate', action='store_true',
-                       help='Disable length field validation')
+                       help='禁用长度字段验证')
     parser.add_argument('-v', '--verbose', action='store_true',
-                       help='Verbose output')
+                       help='详细输出')
     parser.add_argument('-o', '--output', choices=['text', 'hex', 'raw', 'json'], default='text',
-                       help='Output format (default: text)')
+                       help='输出格式（默认：text）')
     parser.add_argument('--parse-time', action='store_true',
-                       help='Parse time frame timestamps as decimal integers')
+                       help='将时间帧时间戳解析为十进制整数')
 
     args = parser.parse_args()
 
@@ -309,7 +309,7 @@ def main():
     else:
         # Default: read binary from stdin
         if sys.stdin.isatty():
-            print("Reading from stdin (binary)...", file=sys.stderr)
+            print("正在从标准输入读取（二进制）...", file=sys.stderr)
         input_stream = sys.stdin.buffer
 
     # Create parser
