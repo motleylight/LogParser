@@ -24,7 +24,7 @@
 
 ### 目录结构
 ```
-log_parser/
+.
 ├── log_parser.py              # 主解析器
 ├── generate_test_data.py      # 测试数据生成器
 └── tests/                     # 测试数据目录
@@ -37,43 +37,43 @@ log_parser/
 ### 运行解析器
 ```bash
 # 解析二进制文件
-python3 log_parser/log_parser.py -f log_parser/tests/test_simple_valid.bin
+python3 log_parser.py -f tests/test_simple_valid.bin
 
 # 解析十六进制输入
-python3 log_parser/log_parser.py -x "7e000548656c6c6f7e"
+python3 log_parser.py -x "7e000548656c6c6f7e"
 
 # 从标准输入读取（二进制）
-cat log_parser/tests/test_simple_valid.bin | python3 log_parser/log_parser.py
+cat tests/test_simple_valid.bin | python3 log_parser.py
 
 # 从标准输入读取十六进制
-echo "7e000548656c6c6f7e" | python3 log_parser/log_parser.py -x
+echo "7e000548656c6c6f7e" | python3 log_parser.py -x
 
 # 禁用长度验证
-python3 log_parser/log_parser.py -f log_parser/tests/test_mixed_bad_frames.bin --no-validate
+python3 log_parser.py -f tests/test_mixed_bad_frames.bin --no-validate
 
 # 详细输出带统计信息
-python3 log_parser/log_parser.py -f log_parser/tests/test_simple_valid.bin -v
+python3 log_parser.py -f tests/test_simple_valid.bin -v
 
 # 以十六进制格式输出
-python3 log_parser/log_parser.py -f log_parser/tests/test_simple_valid.bin -o hex
+python3 log_parser.py -f tests/test_simple_valid.bin -o hex
 
 # 输出原始二进制
-python3 log_parser/log_parser.py -f log_parser/tests/test_simple_valid.bin -o raw > output.bin
+python3 log_parser.py -f tests/test_simple_valid.bin -o raw > output.bin
 ```
 
 ### 生成测试数据
 ```bash
 # 重新生成所有测试文件
-python3 log_parser/generate_test_data.py
+python3 generate_test_data.py
 ```
 
 ### 检查二进制文件
 ```bash
 # 查看二进制文件的十六进制转储（需要 xxd 权限）
-xxd log_parser/tests/test_simple_valid.bin
+xxd tests/test_simple_valid.bin
 
 # 比较二进制和十六进制文件
-xxd -r -p log_parser/tests/test_simple_valid.hex | xxd
+xxd -r -p tests/test_simple_valid.hex | xxd
 ```
 
 ## 开发说明
