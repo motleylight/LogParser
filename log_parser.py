@@ -2,8 +2,7 @@
 """
 日志解析器 - 解析带时间标记的二进制日志帧的工具。
 
-帧以0x7E开始和结束，开始后有一个2字节长度字段（大端序）。
-时间帧为8字节，以0xAA 0xAA开头。
+帧格式可配置：帧起始标记、长度字段位置和大小、帧结束标记等。
 """
 import argparse
 import sys
@@ -11,16 +10,92 @@ import os
 import select
 import io
 import json
-from typing import Optional, BinaryIO, Iterator
+from typing import Optional, BinaryIO, Iterator, Tuple
 
-FRAME_START = b'\x7e'
-FRAME_END = b'\x7e'
-TIME_MARKER = b'\xaa\xaa'
-TIME_FRAME_LENGTH = 8
+class FrameFormat:
+    """
+    可配置的帧格式定义。
+    要修改帧格式，请修改此类的属性。
+    """
+
+    # === 常规帧配置 ===
+    FRAME_START = b'\x7e'                    # 帧起始标记
+    FRAME_END = b'\x7e'                      # 帧结束标记
+
+    # 长度字段配置
+    LENGTH_FIELD_OFFSET = 1                  # 长度字段相对于帧起始的偏移（字节）
+    LENGTH_FIELD_SIZE = 2                    # 长度字段的大小（字节）
+    LENGTH_FIELD_BIG_ENDIAN = True           # True=大端序，False=小端序
+
+    # === 时间帧配置 ===
+    TIME_MARKER = b'\xaa\xaa'                # 时间帧起始标记
+    TIME_FRAME_LENGTH = 8                    # 时间帧总长度（字节）
+    # 时间帧结构：TIME_MARKER (2字节) + 时间戳 (6字节)
+
+    # === 计算得到的属性 ===
+    @property
+    def min_frame_size(self) -> int:
+        """最小帧大小：起始 + 长度字段 + 最小载荷(0) + 结束"""
+        return (len(self.FRAME_START) +
+                self.LENGTH_FIELD_SIZE +
+                len(self.FRAME_END))
+
+    @property
+    def length_field_end(self) -> int:
+        """长度字段结束位置（相对于帧起始）"""
+        return self.LENGTH_FIELD_OFFSET + self.LENGTH_FIELD_SIZE
+
+    @property
+    def time_timestamp_size(self) -> int:
+        """时间帧中时间戳部分的大小"""
+        return self.TIME_FRAME_LENGTH - len(self.TIME_MARKER)
+
+    def parse_length(self, length_bytes: bytes) -> int:
+        """解析长度字段字节"""
+        if self.LENGTH_FIELD_SIZE == 2:
+            if self.LENGTH_FIELD_BIG_ENDIAN:
+                return (length_bytes[0] << 8) | length_bytes[1]
+            else:
+                return (length_bytes[1] << 8) | length_bytes[0]
+        elif self.LENGTH_FIELD_SIZE == 4:
+            if self.LENGTH_FIELD_BIG_ENDIAN:
+                return (length_bytes[0] << 24) | (length_bytes[1] << 16) | \
+                       (length_bytes[2] << 8) | length_bytes[3]
+            else:
+                return (length_bytes[3] << 24) | (length_bytes[2] << 16) | \
+                       (length_bytes[1] << 8) | length_bytes[0]
+        else:
+            # 处理1字节或3字节等不常见情况
+            result = 0
+            if self.LENGTH_FIELD_BIG_ENDIAN:
+                for i, byte in enumerate(length_bytes):
+                    result = (result << 8) | byte
+            else:
+                for i, byte in enumerate(reversed(length_bytes)):
+                    result = (result << 8) | byte
+            return result
+
+    def extract_length_field(self, data: bytearray) -> Tuple[int, bytes]:
+        """
+        从数据中提取长度字段。
+        返回：(长度值, 长度字段字节)
+        """
+        if len(data) < self.length_field_end:
+            raise ValueError("数据不足，无法提取长度字段")
+
+        start_idx = self.LENGTH_FIELD_OFFSET
+        end_idx = self.length_field_end
+        length_bytes = bytes(data[start_idx:end_idx])
+        length = self.parse_length(length_bytes)
+        return length, length_bytes
+
+# 默认帧格式实例
+DEFAULT_FORMAT = FrameFormat()
 
 class LogParser:
-    def __init__(self, validate_length: bool = True):
+    def __init__(self, validate_length: bool = True, frame_format: FrameFormat = None):
         self.validate_length = validate_length
+        self.frame_format = frame_format or DEFAULT_FORMAT
         self.buffer = bytearray()
         self.stats = {
             'frames_found': 0,
@@ -38,9 +113,11 @@ class LogParser:
         """从缓冲区查找并提取下一帧，移除已处理的字节。
         返回帧字节，如果没有找到完整帧则返回None。
         """
+        fmt = self.frame_format
+
         # 查找时间标记或帧起始的最早出现位置
-        time_frame_idx = self.buffer.find(TIME_MARKER)
-        frame_start_idx = self.buffer.find(FRAME_START)
+        time_frame_idx = self.buffer.find(fmt.TIME_MARKER)
+        frame_start_idx = self.buffer.find(fmt.FRAME_START)
 
         # 确定哪个标记最先出现（将-1视为未找到）
         candidates = []
@@ -64,52 +141,75 @@ class LogParser:
 
         if marker_type == 'time':
             # 检查是否有足够的数据构成完整的时间帧
-            if len(self.buffer) >= TIME_FRAME_LENGTH:
-                time_frame = bytes(self.buffer[:TIME_FRAME_LENGTH])
-                del self.buffer[:TIME_FRAME_LENGTH]
+            if len(self.buffer) >= fmt.TIME_FRAME_LENGTH:
+                time_frame = bytes(self.buffer[:fmt.TIME_FRAME_LENGTH])
+                del self.buffer[:fmt.TIME_FRAME_LENGTH]
                 self.stats['time_frames_found'] += 1
                 return time_frame
             # 数据不足，无法构成时间帧
             return None
         else:
             # marker_type == 'frame'
-            # 至少需要4字节：起始(1) + 长度(2) + 结束(1) 最小值
-            if len(self.buffer) < 4:
+            # 检查是否有最小帧所需的数据
+            if len(self.buffer) < fmt.min_frame_size:
                 return None
 
-            # 检查长度字段（起始后的2字节）
-            length = (self.buffer[1] << 8) | self.buffer[2]
+            try:
+                # 提取长度字段
+                length, _ = fmt.extract_length_field(self.buffer)
+            except (ValueError, IndexError):
+                # 数据不足以提取长度字段，或者长度字段解析错误
+                # 尝试查找帧结束标记以恢复
+                end_idx = self.buffer.find(fmt.FRAME_END, len(fmt.FRAME_START))
+                if end_idx == -1:
+                    # 未找到结束标记，等待更多数据
+                    return None
+                # 提取到结束标记的帧
+                frame_end_idx = end_idx + len(fmt.FRAME_END)
+                frame_bytes = bytes(self.buffer[:frame_end_idx])
+                del self.buffer[:frame_end_idx]
+                self.stats['invalid_frames'] += 1
+                return frame_bytes
 
-            # 计算预期帧大小：起始(1) + 长度(2) + 载荷(长度) + 结束(1)
-            expected_frame_size = 1 + 2 + length + 1
+            # 计算预期帧大小
+            # length_field_end 已经包含从帧开始到长度字段结束的所有字节
+            # 所以只需要：长度字段结束位置 + 载荷长度 + 帧结束标记长度
+            expected_frame_size = (
+                fmt.length_field_end +
+                length +
+                len(fmt.FRAME_END)
+            )
 
             if len(self.buffer) < expected_frame_size:
                 # 根据长度字段，数据不足以构成完整帧
                 # 这可能是由于错误的长度字段或不完整的帧
-                # 尝试查找FRAME_END以恢复
-                end_idx = self.buffer.find(FRAME_END, 3)  # 在长度字段后开始搜索
+                # 尝试查找帧结束标记以恢复
+                end_idx = self.buffer.find(fmt.FRAME_END, fmt.length_field_end)
                 if end_idx == -1:
                     # 未找到结束标记，等待更多数据
                     return None
                 # 提取到结束标记的帧
-                frame_bytes = bytes(self.buffer[:end_idx + 1])
-                del self.buffer[:end_idx + 1]
+                frame_end_idx = end_idx + len(fmt.FRAME_END)
+                frame_bytes = bytes(self.buffer[:frame_end_idx])
+                del self.buffer[:frame_end_idx]
                 self.stats['invalid_frames'] += 1
                 return frame_bytes
 
-            # 检查帧是否在预期位置以FRAME_END结束
-            if self.buffer[expected_frame_size - 1] != 0x7e:
-                # 在预期位置未找到帧结束标记
+            # 检查帧是否在预期位置以正确的结束标记结束
+            frame_end_start = expected_frame_size - len(fmt.FRAME_END)
+            actual_end = bytes(self.buffer[frame_end_start:expected_frame_size])
+            if actual_end != fmt.FRAME_END:
+                # 在预期位置未找到正确的帧结束标记
                 # 这可能是由于长度字段错误
-                # 尝试查找下一个FRAME_END
-                end_idx = self.buffer.find(FRAME_END, 3)  # 在长度字段后开始搜索
+                # 尝试查找下一个帧结束标记
+                end_idx = self.buffer.find(fmt.FRAME_END, fmt.length_field_end)
                 if end_idx == -1:
                     # 未找到结束标记，等待更多数据
                     return None
-
                 # 提取到结束标记的帧
-                frame_bytes = bytes(self.buffer[:end_idx + 1])
-                del self.buffer[:end_idx + 1]
+                frame_end_idx = end_idx + len(fmt.FRAME_END)
+                frame_bytes = bytes(self.buffer[:frame_end_idx])
+                del self.buffer[:frame_end_idx]
                 self.stats['invalid_frames'] += 1
                 return frame_bytes
 
@@ -225,19 +325,23 @@ def main():
             elif args.output == 'json':
                 # JSON output
                 frame_info = {
-                    'type': 'time_frame' if frame.startswith(TIME_MARKER) else 'frame',
+                    'type': 'time_frame' if frame.startswith(DEFAULT_FORMAT.TIME_MARKER) else 'frame',
                     'hex': frame.hex(),
                     'length': len(frame)
                 }
-                if frame.startswith(TIME_MARKER) and args.parse_time:
-                    # Parse 6-byte timestamp (big-endian)
-                    timestamp = int.from_bytes(frame[2:], 'big')
+                if frame.startswith(DEFAULT_FORMAT.TIME_MARKER) and args.parse_time:
+                    # Parse timestamp (big-endian)
+                    timestamp_start = len(DEFAULT_FORMAT.TIME_MARKER)
+                    timestamp_end = timestamp_start + DEFAULT_FORMAT.time_timestamp_size
+                    timestamp = int.from_bytes(frame[timestamp_start:timestamp_end], 'big')
                     frame_info['timestamp'] = timestamp
                 print(json.dumps(frame_info))
             else:  # text output (default)
-                if frame.startswith(TIME_MARKER):
+                if frame.startswith(DEFAULT_FORMAT.TIME_MARKER):
                     if args.parse_time:
-                        timestamp = int.from_bytes(frame[2:], 'big')
+                        timestamp_start = len(DEFAULT_FORMAT.TIME_MARKER)
+                        timestamp_end = timestamp_start + DEFAULT_FORMAT.time_timestamp_size
+                        timestamp = int.from_bytes(frame[timestamp_start:timestamp_end], 'big')
                         print(f"TIME_FRAME: {frame.hex()} (timestamp: {timestamp})")
                     else:
                         print(f"TIME_FRAME: {frame.hex()}")
