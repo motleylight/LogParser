@@ -1,43 +1,102 @@
 #!/usr/bin/env python3
 """
 生成日志解析器的测试数据。
+使用与log_parser相同的帧格式配置。
 """
 import random
 import struct
 import sys
 from typing import List
 
-FRAME_START = b'\x7e'
-FRAME_END = b'\x7e'
-TIME_MARKER = b'\xaa\xaa'
+# 导入log_parser中的帧格式配置
+import log_parser
+DEFAULT_FORMAT = log_parser.DEFAULT_FORMAT
 
 def create_frame(payload: bytes, length_field_correct: bool = True) -> bytes:
     """
     使用给定的载荷创建帧。
     如果 length_field_correct 为 False，将长度字段设置为错误值。
     """
-    # 长度字段为2字节，大端序，表示载荷长度
+    fmt = DEFAULT_FORMAT
     payload_len = len(payload)
+
     if length_field_correct:
-        length_bytes = struct.pack('>H', payload_len)
+        length = payload_len
     else:
         # 设置错误长度：更短或更长
         if random.choice([True, False]):
             wrong_len = max(0, payload_len - random.randint(1, 5))
         else:
             wrong_len = payload_len + random.randint(1, 5)
-        length_bytes = struct.pack('>H', wrong_len)
+        length = wrong_len
 
-    return FRAME_START + length_bytes + payload + FRAME_END
+    # 根据帧格式配置生成长度字段字节
+    if fmt.LENGTH_FIELD_SIZE == 1:
+        length_bytes = struct.pack('B', length & 0xFF)
+    elif fmt.LENGTH_FIELD_SIZE == 2:
+        if fmt.LENGTH_FIELD_BIG_ENDIAN:
+            length_bytes = struct.pack('>H', length)
+        else:
+            length_bytes = struct.pack('<H', length)
+    elif fmt.LENGTH_FIELD_SIZE == 4:
+        if fmt.LENGTH_FIELD_BIG_ENDIAN:
+            length_bytes = struct.pack('>I', length)
+        else:
+            length_bytes = struct.pack('<I', length)
+    else:
+        # 处理其他大小的长度字段
+        result = bytearray(fmt.LENGTH_FIELD_SIZE)
+        if fmt.LENGTH_FIELD_BIG_ENDIAN:
+            for i in range(fmt.LENGTH_FIELD_SIZE):
+                shift = (fmt.LENGTH_FIELD_SIZE - 1 - i) * 8
+                result[i] = (length >> shift) & 0xFF
+        else:
+            for i in range(fmt.LENGTH_FIELD_SIZE):
+                shift = i * 8
+                result[i] = (length >> shift) & 0xFF
+        length_bytes = bytes(result)
+
+    # 构建帧：起始标记 + 其他信息（如果有）+ 长度字段 + 载荷 + 结束标记
+    # 注意：如果LENGTH_FIELD_OFFSET > len(FRAME_START)，需要在起始标记和长度字段之间填充其他信息
+    frame_parts = []
+    frame_parts.append(fmt.FRAME_START)
+
+    # 如果长度字段有偏移，添加填充字节（这里用0x00填充，实际使用时可以修改）
+    if fmt.LENGTH_FIELD_OFFSET > len(fmt.FRAME_START):
+        padding_size = fmt.LENGTH_FIELD_OFFSET - len(fmt.FRAME_START)
+        frame_parts.append(b'\x00' * padding_size)
+
+    frame_parts.append(length_bytes)
+    frame_parts.append(payload)
+    frame_parts.append(fmt.FRAME_END)
+
+    return b''.join(frame_parts)
 
 def create_time_frame(timestamp: int = None) -> bytes:
-    """创建以AA AA开头的8字节时间帧。"""
+    """创建时间帧。"""
+    fmt = DEFAULT_FORMAT
     if timestamp is None:
-        timestamp = random.randint(0, 0xFFFFFFFF)
-    # 时间帧结构：AA AA + 6字节时间戳（大端序6字节）
-    # 我们将使用6字节时间戳（48位）
-    time_bytes = struct.pack('>Q', timestamp)[2:]  # 取8字节整数的最后6个字节
-    return TIME_MARKER + time_bytes
+        # 生成随机时间戳，适应时间戳大小
+        max_ts = (1 << (fmt.time_timestamp_size * 8)) - 1
+        timestamp = random.randint(0, max_ts)
+
+    # 根据时间戳大小生成长度合适的字节
+    if fmt.time_timestamp_size == 6:
+        # 6字节时间戳：使用8字节打包然后取后6字节
+        time_bytes = struct.pack('>Q', timestamp)[8 - fmt.time_timestamp_size:]
+    elif fmt.time_timestamp_size == 4:
+        time_bytes = struct.pack('>I', timestamp)
+    elif fmt.time_timestamp_size == 8:
+        time_bytes = struct.pack('>Q', timestamp)
+    else:
+        # 其他大小：手动构造大端字节
+        result = bytearray(fmt.time_timestamp_size)
+        for i in range(fmt.time_timestamp_size):
+            shift = (fmt.time_timestamp_size - 1 - i) * 8
+            result[i] = (timestamp >> shift) & 0xFF
+        time_bytes = bytes(result)
+
+    return fmt.TIME_MARKER + time_bytes
 
 def generate_test_data() -> bytes:
     """生成包含各种场景的测试数据。"""
@@ -59,10 +118,13 @@ def generate_test_data() -> bytes:
 
     # 3. 不完整帧（缺少结束标记）
     print("Generating incomplete frames...")
+    fmt = DEFAULT_FORMAT
     for i in range(2):
         payload = f"Incomplete frame {i}".encode('ascii')
-        length_bytes = struct.pack('>H', len(payload))
-        incomplete = FRAME_START + length_bytes + payload  # 无FRAME_END
+        # 使用正确的长度字段生成
+        frame = create_frame(payload, length_field_correct=True)
+        # 移除结束标记使其不完整
+        incomplete = frame[:-len(fmt.FRAME_END)]
         data_parts.append(incomplete)
 
     # 4. 在随机位置插入时间帧
@@ -90,9 +152,10 @@ def generate_large_complex() -> bytes:
     - 帧之间夹杂垃圾数据
     - 帧内穿插时间帧（时间帧作为载荷的一部分）
     - 帧间穿插时间帧
-    - 错帧，长度字段为FFFF
+    - 错帧，长度字段为最大值（全1）
     """
     data_parts = []
+    fmt = DEFAULT_FORMAT
 
     # 1. 开头的垃圾数据（约100字节）
     print("生成开头垃圾数据...")
@@ -114,12 +177,40 @@ def generate_large_complex() -> bytes:
         else:
             payload = f"Frame {i} normal".encode('ascii')
 
-        # 随机决定是否创建错帧（长度字段为FFFF）
+        # 随机决定是否创建错帧（长度字段为最大值）
         if random.choice([True, False]) and i % 3 == 0:  # 大约1/3的帧为错帧
-            # 错帧：长度字段设置为0xFFFF
-            length_bytes = struct.pack('>H', 0xFFFF)  # 错误长度
-            frame = FRAME_START + length_bytes + payload + FRAME_END
-            print(f"  创建错帧 {i}，长度字段=FFFF")
+            # 错帧：长度字段设置为最大值（全1）
+            max_length = (1 << (fmt.LENGTH_FIELD_SIZE * 8)) - 1
+            # 生成长度字段字节
+            if fmt.LENGTH_FIELD_SIZE == 1:
+                length_bytes = struct.pack('B', max_length)
+            elif fmt.LENGTH_FIELD_SIZE == 2:
+                if fmt.LENGTH_FIELD_BIG_ENDIAN:
+                    length_bytes = struct.pack('>H', max_length)
+                else:
+                    length_bytes = struct.pack('<H', max_length)
+            elif fmt.LENGTH_FIELD_SIZE == 4:
+                if fmt.LENGTH_FIELD_BIG_ENDIAN:
+                    length_bytes = struct.pack('>I', max_length)
+                else:
+                    length_bytes = struct.pack('<I', max_length)
+            else:
+                # 手动构造
+                length_bytes = bytes([0xFF] * fmt.LENGTH_FIELD_SIZE)
+
+            # 构建错帧
+            frame_parts = []
+            frame_parts.append(fmt.FRAME_START)
+            if fmt.LENGTH_FIELD_OFFSET > len(fmt.FRAME_START):
+                padding_size = fmt.LENGTH_FIELD_OFFSET - len(fmt.FRAME_START)
+                frame_parts.append(b'\x00' * padding_size)
+            frame_parts.append(length_bytes)
+            frame_parts.append(payload)
+            frame_parts.append(fmt.FRAME_END)
+            frame = b''.join(frame_parts)
+
+            hex_length = length_bytes.hex()
+            print(f"  创建错帧 {i}，长度字段={hex_length}")
         else:
             # 正常帧
             frame = create_frame(payload, length_field_correct=True)
@@ -148,6 +239,7 @@ def generate_large_complex() -> bytes:
 
 def write_test_files():
     """将测试数据写入文件。"""
+    fmt = DEFAULT_FORMAT
     # 生成各种测试用例
     test_cases = {
         'simple_valid': b''.join([
@@ -163,7 +255,7 @@ def write_test_files():
         'mixed_bad_frames': generate_test_data(),
         'incomplete_at_end': b''.join([
             create_frame(b"Complete"),
-            FRAME_START + struct.pack('>H', 5) + b"start",
+            create_frame(b"start", length_field_correct=True)[:-len(fmt.FRAME_END)],
         ]),
         'hex_input_example': b'7e000548656c6c6f7e',  # 包含'Hello'的帧的十六进制表示
         # 额外测试用例
@@ -174,7 +266,7 @@ def write_test_files():
         'empty_input': b'',
         'unicode_payload': create_frame("测试".encode('utf-8')),
         'multiple_time_frames_contiguous': b''.join([create_time_frame(0x123456 + i) for i in range(3)]),
-        'time_frame_inside_frame': create_frame(b"Hello" + TIME_MARKER + b"World", length_field_correct=True),
+        'time_frame_inside_frame': create_frame(b"Hello" + fmt.TIME_MARKER + b"World", length_field_correct=True),
         'large_complex': generate_large_complex(),
     }
 
