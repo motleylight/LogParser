@@ -93,8 +93,7 @@ class FrameFormat:
 DEFAULT_FORMAT = FrameFormat()
 
 class LogParser:
-    def __init__(self, validate_length: bool = True, frame_format: FrameFormat = None):
-        self.validate_length = validate_length
+    def __init__(self, frame_format: FrameFormat = None):
         self.frame_format = frame_format or DEFAULT_FORMAT
         self.buffer = bytearray()
         self.stats = {
@@ -268,12 +267,10 @@ def main():
     input_group = parser.add_mutually_exclusive_group()
     input_group.add_argument('-f', '--file', help='输入二进制文件')
     input_group.add_argument('-x', '--hex', nargs='?', const='',
-                           help='十六进制字符串输入（如未提供值则从标准输入读取）')
+                           help='十六进制字符串输入')
     input_group.add_argument('-s', '--stdin', action='store_true',
-                           help='显式从标准输入读取二进制数据（无其他输入时的默认行为）')
+                           help='显式从标准输入读取二进制数据')
 
-    parser.add_argument('--no-validate', action='store_true',
-                       help='禁用长度字段验证')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='详细输出')
     parser.add_argument('-o', '--output', choices=['text', 'hex', 'raw', 'json'], default='text',
@@ -282,6 +279,18 @@ def main():
                        help='将时间帧时间戳解析为十进制整数')
 
     args = parser.parse_args()
+
+    # 如果没有任何输入源且标准输入是终端，显示帮助并提示输入文件
+    if (not args.file and args.hex is None and not args.stdin
+            and sys.stdin.isatty()):
+        parser.print_help()
+        print("\n" + "="*60, file=sys.stderr)
+        print("提示：未指定输入源", file=sys.stderr)
+        file_path = input("请输入bin文件路径: ").strip()
+        if not file_path:
+            print("错误：未提供文件路径", file=sys.stderr)
+            sys.exit(1)
+        args.file = file_path
 
     # Determine input source
     input_data = None
@@ -313,7 +322,7 @@ def main():
         input_stream = sys.stdin.buffer
 
     # Create parser
-    parser_inst = LogParser(validate_length=not args.no_validate)
+    parser_inst = LogParser()
 
     # Process input
     try:
