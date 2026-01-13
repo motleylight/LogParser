@@ -10,7 +10,16 @@ import os
 import select
 import io
 import json
+import time
 from typing import Optional, BinaryIO, Iterator, Tuple
+
+# 尝试导入串口库，如果未安装则提供友好提示
+try:
+    import serial
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    SERIAL_AVAILABLE = False
 
 class FrameFormat:
     """
@@ -261,6 +270,9 @@ def main():
   cat logfile.bin | %(prog)s
   %(prog)s -x "7e000548656c6c6f7e"
   echo "7e000548656c6c6f7e" | %(prog)s -x
+  %(prog)s -p /dev/ttyUSB0 --baud 115200
+  %(prog)s -p COM3 --baud 9600 --parity E
+  %(prog)s --list-ports
         """
     )
 
@@ -270,6 +282,24 @@ def main():
                            help='十六进制字符串输入')
     input_group.add_argument('-s', '--stdin', action='store_true',
                            help='显式从标准输入读取二进制数据')
+    input_group.add_argument('-p', '--port',
+                           help='串口设备路径（如 /dev/ttyUSB0 或 COM3）')
+
+    # 串口参数（仅在指定 --port 时使用）
+    parser.add_argument('--baud', type=int, default=115200,
+                       help='串口波特率（默认：115200）')
+    parser.add_argument('--bytesize', type=int, choices=[5, 6, 7, 8], default=8,
+                       help='数据位（默认：8）')
+    parser.add_argument('--parity', choices=['N', 'E', 'O', 'M', 'S'], default='N',
+                       help='奇偶校验：N(无)、E(偶)、O(奇)、M(标记)、S(空格)（默认：N）')
+    parser.add_argument('--stopbits', type=float, choices=[1, 1.5, 2], default=1.0,
+                       help='停止位（默认：1）')
+    parser.add_argument('--rtscts', action='store_true',
+                       help='启用 RTS/CTS 硬件流控制')
+    parser.add_argument('--timeout', type=float,
+                       help='读取超时（秒），默认：None（阻塞读取）')
+    parser.add_argument('--list-ports', action='store_true',
+                       help='列出可用串口并退出')
 
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='详细输出')
@@ -280,8 +310,22 @@ def main():
 
     args = parser.parse_args()
 
+    # 处理 --list-ports 选项
+    if args.list_ports:
+        if not SERIAL_AVAILABLE:
+            print("错误：pyserial 库未安装，无法列出串口。", file=sys.stderr)
+            print("请使用 pip install pyserial 安装。", file=sys.stderr)
+            sys.exit(1)
+        print("可用串口：")
+        ports = serial.tools.list_ports.comports()
+        if not ports:
+            print("  未找到串口。")
+        for port in ports:
+            print(f"  {port.device}: {port.description} [{port.manufacturer}]")
+        sys.exit(0)
+
     # 如果没有任何输入源且标准输入是终端，显示帮助并提示输入文件
-    if (not args.file and args.hex is None and not args.stdin
+    if (not args.file and args.hex is None and not args.stdin and args.port is None
             and sys.stdin.isatty()):
         parser.print_help()
         print("\n" + "="*60, file=sys.stderr)
@@ -296,7 +340,57 @@ def main():
     input_data = None
     input_stream = None
 
-    if args.file:
+    if args.port:
+        # 串口输入
+        if not SERIAL_AVAILABLE:
+            print("错误：pyserial 库未安装，无法使用串口功能。", file=sys.stderr)
+            print("请使用 pip install pyserial 安装。", file=sys.stderr)
+            sys.exit(1)
+
+        # 映射数据位到 serial 库常量
+        bytesize_map = {
+            5: serial.FIVEBITS,
+            6: serial.SIXBITS,
+            7: serial.SEVENBITS,
+            8: serial.EIGHTBITS
+        }
+
+        # 映射奇偶校验字符到 serial 库常量
+        parity_map = {
+            'N': serial.PARITY_NONE,
+            'E': serial.PARITY_EVEN,
+            'O': serial.PARITY_ODD,
+            'M': serial.PARITY_MARK,
+            'S': serial.PARITY_SPACE
+        }
+
+        # 映射停止位
+        stopbits_map = {
+            1: serial.STOPBITS_ONE,
+            1.5: serial.STOPBITS_ONE_POINT_FIVE,
+            2: serial.STOPBITS_TWO
+        }
+
+        try:
+            serial_port = serial.Serial(
+                port=args.port,
+                baudrate=args.baud,
+                bytesize=bytesize_map[args.bytesize],
+                parity=parity_map[args.parity],
+                stopbits=stopbits_map[args.stopbits],
+                rtscts=args.rtscts,
+                timeout=args.timeout
+            )
+            input_stream = serial_port
+            if args.verbose:
+                print(f"已打开串口 {args.port}，波特率 {args.baud}", file=sys.stderr)
+        except serial.SerialException as e:
+            print(f"错误：无法打开串口 {args.port}: {e}", file=sys.stderr)
+            sys.exit(1)
+        except KeyError as e:
+            print(f"错误：无效的串口参数: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.file:
         try:
             input_stream = open(args.file, 'rb')
         except FileNotFoundError:
@@ -359,7 +453,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if args.file and input_stream:
+        if (args.file or args.port) and input_stream:
             input_stream.close()
 
     # Print statistics if verbose
